@@ -10,7 +10,7 @@
 ;; ============================================================
 
 (def registry
-  {;; Notes (8)
+  {;; Notes (13)
    :set-notes-entries     notes/set-notes-entries
    :add-notes-entry       notes/add-notes-entry
    :set-notes-selected    notes/set-notes-selected
@@ -19,6 +19,11 @@
    :set-notes-read-entry  notes/set-notes-read-entry
    :append-notes-response notes/append-notes-response
    :set-notes-regenerating notes/set-notes-regenerating
+   :set-entry-followup-input    notes/set-entry-followup-input
+   :set-entry-followup-loading  notes/set-entry-followup-loading
+   :set-response-followup-loading notes/set-response-followup-loading
+   :update-entry-content        notes/update-entry-content
+   :update-response-content     notes/update-response-content
 
    ;; UI (4)
    :set-loading  ui/set-loading

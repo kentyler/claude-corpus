@@ -1,6 +1,6 @@
 (ns app.transforms.notes
   "Pure notes/corpus transforms — (state, args) -> state.
-   8 transforms for the append-only corpus UI.")
+   13 transforms for the append-only corpus UI.")
 
 (defn set-notes-entries [state entries]
   (assoc state :notes-entries entries))
@@ -29,3 +29,24 @@
 
 (defn set-notes-regenerating [state loading?]
   (assoc state :notes-regenerating? loading?))
+
+(defn set-entry-followup-input [state text]
+  (assoc state :notes-entry-followup-input text))
+
+(defn set-entry-followup-loading [state loading?]
+  (assoc state :notes-entry-followup-loading? loading?))
+
+(defn set-response-followup-loading [state loading?]
+  (assoc state :notes-response-followup-loading? loading?))
+
+(defn update-entry-content [state content]
+  (assoc-in state [:notes-read-entry :content] content))
+
+(defn update-response-content [state response-id content]
+  (update state :notes-read-responses
+          (fn [responses]
+            (mapv (fn [r]
+                    (if (= (:id r) response-id)
+                      (assoc r :content content)
+                      r))
+                  responses))))

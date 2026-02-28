@@ -9,4 +9,4 @@
                 :asset-path "/js"
                 :modules {:main {:entries [app.core]}}
                 :devtools {:http-root "resources/public"
-                           :http-port 8281}}}}
+                           :http-port 8283}}}}

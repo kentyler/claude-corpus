@@ -1,7 +1,7 @@
 {
-  "name": "corpus",
+  "name": "claude-corpus",
   "version": "0.1.0",
-  "description": "An append-only corpus with multi-model LLM integration",
+  "description": "A persistent memory corpus for LLM agents — append-only notes with semantic retrieval and adversarial response layer",
   "scripts": {
     "start": "cd server && node index.js",
     "test": "cd server && npx jest --forceExit"

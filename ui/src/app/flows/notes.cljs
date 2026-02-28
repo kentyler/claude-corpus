@@ -80,3 +80,40 @@
                     (let [err-msg (or (get-in response [:data :error]) "Regenerate failed")]
                       (t/dispatch! :set-error err-msg)))))))
           ctx)}])
+
+(def followup-entry-flow
+  "POST /api/notes/:id/followup for the center pane (human entry follow-up)"
+  [{:step :do
+    :fn (fn [ctx]
+          (let [entry (:notes-read-entry @app-state)
+                prompt (:notes-entry-followup-input @app-state)
+                entry-id (:id entry)]
+            (when (and entry-id prompt (not (clojure.string/blank? prompt)))
+              (t/dispatch! :set-entry-followup-loading true)
+              (go
+                (let [response (<! (http/post! (str api-base "/api/notes/" entry-id "/followup")
+                                               :json-params {:prompt prompt}))]
+                  (t/dispatch! :set-entry-followup-loading false)
+                  (t/dispatch! :set-entry-followup-input "")
+                  (if (:ok? response)
+                    (t/dispatch! :update-entry-content (get-in response [:data :content]))
+                    (let [err-msg (or (get-in response [:data :error]) "Follow-up failed")]
+                      (t/dispatch! :set-error err-msg)))))))
+          ctx)}])
+
+(def followup-response-flow
+  "POST /api/notes/:id/followup for the right pane (response follow-up)"
+  [{:step :do
+    :fn (fn [ctx]
+          (let [{:keys [response-id prompt]} ctx]
+            (when (and response-id prompt (not (clojure.string/blank? prompt)))
+              (t/dispatch! :set-response-followup-loading true)
+              (go
+                (let [response (<! (http/post! (str api-base "/api/notes/" response-id "/followup")
+                                               :json-params {:prompt prompt}))]
+                  (t/dispatch! :set-response-followup-loading false)
+                  (if (:ok? response)
+                    (t/dispatch! :update-response-content response-id (get-in response [:data :content]))
+                    (let [err-msg (or (get-in response [:data :error]) "Follow-up failed")]
+                      (t/dispatch! :set-error err-msg)))))))
+          ctx)}])

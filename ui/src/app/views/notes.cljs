@@ -53,7 +53,9 @@
           [:div.notes-sidebar-item
            {:class (str "human"
                         (when (= (:id entry) selected-id) " selected"))
-            :on-click #(f/run-fire-and-forget! notes-flow/select-entry-flow {:id (:id entry)})}
+            :on-click (fn []
+                        (t/dispatch! :set-entry-followup-input "")
+                        (f/run-fire-and-forget! notes-flow/select-entry-flow {:id (:id entry)}))}
            [:div.notes-sidebar-preview (first-line (:content entry))]
            [:div.notes-sidebar-time (relative-time (:created_at entry))]]))]]))
 
@@ -82,7 +84,8 @@
         {:on-click (fn []
                      (t/dispatch! :set-notes-selected nil)
                      (t/dispatch! :set-notes-read-entry nil [])
-                     (t/dispatch! :set-notes-input ""))
+                     (t/dispatch! :set-notes-input "")
+                     (t/dispatch! :set-entry-followup-input ""))
          :title "New entry"}
         "+"]]]
      (if viewing?
@@ -98,14 +101,33 @@
                                    (.-ctrlKey e))
                           (.preventDefault e)
                           (f/run-fire-and-forget! notes-flow/submit-entry-flow)))}])
-     [:div.notes-entry-footer
-      (if loading?
-        [:span.notes-loading-indicator "Reading the corpus..."]
-        (when-not viewing?
+     (if viewing?
+       ;; Follow-up bar when viewing an entry
+       (let [followup-input (:notes-entry-followup-input @state/app-state)
+             followup-loading? (:notes-entry-followup-loading? @state/app-state)]
+         [:div.followup-bar
+          [:input.followup-input
+           {:type "text"
+            :value followup-input
+            :placeholder "Follow up on this entry..."
+            :disabled followup-loading?
+            :on-change #(t/dispatch! :set-entry-followup-input (.. % -target -value))
+            :on-key-down (fn [e]
+                           (when (= (.-key e) "Enter")
+                             (.preventDefault e)
+                             (f/run-fire-and-forget! notes-flow/followup-entry-flow)))}]
+          [:button.followup-submit-btn
+           {:on-click #(f/run-fire-and-forget! notes-flow/followup-entry-flow)
+            :disabled (or followup-loading? (str/blank? followup-input))}
+           (if followup-loading? "..." "Send")]])
+       ;; Submit footer when composing
+       [:div.notes-entry-footer
+        (if loading?
+          [:span.notes-loading-indicator "Reading the corpus..."]
           [:button.notes-submit-btn
            {:on-click #(f/run-fire-and-forget! notes-flow/submit-entry-flow)
             :disabled (or loading? (str/blank? input))}
-           "Submit (Ctrl+Enter)"]))]]))
+           "Submit (Ctrl+Enter)"])])]))
 
 ;; ============================================================
 ;; RESPONSE CONDITIONS — model, temperature, sampling dropdowns + retry
@@ -187,6 +209,39 @@
              [:div.notes-routing-reasoning reasoning])])))))
 
 ;; ============================================================
+;; RESPONSE FOLLOW-UP — per-response-card follow-up input
+;; ============================================================
+
+(defn- response-followup
+  "Form-2 component with local ratom for input text. Renders under each response card."
+  [response-id]
+  (let [input (r/atom "")]
+    (fn [response-id]
+      (let [loading? (:notes-response-followup-loading? @state/app-state)]
+        [:div.followup-bar
+         [:input.followup-input
+          {:type "text"
+           :value @input
+           :placeholder "Follow up on this response..."
+           :disabled loading?
+           :on-change #(reset! input (.. % -target -value))
+           :on-key-down (fn [e]
+                          (when (= (.-key e) "Enter")
+                            (.preventDefault e)
+                            (let [prompt @input]
+                              (reset! input "")
+                              (f/run-fire-and-forget! notes-flow/followup-response-flow
+                                                     {:response-id response-id :prompt prompt}))))}]
+         [:button.followup-submit-btn
+          {:on-click (fn []
+                       (let [prompt @input]
+                         (reset! input "")
+                         (f/run-fire-and-forget! notes-flow/followup-response-flow
+                                                {:response-id response-id :prompt prompt})))
+           :disabled (or loading? (str/blank? @input))}
+          (if loading? "..." "Send")]]))))
+
+;; ============================================================
 ;; READ PANE — responses (supports multiple)
 ;; ============================================================
 
@@ -207,7 +262,8 @@
                [:span.model-label (:model_name response)])
              [:span.notes-read-time (relative-time (:created_at response))]]
             [:div.notes-read-text (:content response)]]
-           [response-conditions response human-entry registry-models]])]
+           [response-conditions response human-entry registry-models]
+           [response-followup (:id response)]])]
        [:div.notes-read-placeholder
         "Write an entry to see the corpus respond."])]))
 

@@ -27,6 +27,9 @@
            :notes-read-entry nil
            :notes-read-responses []
            :notes-regenerating? false
+           :notes-entry-followup-input ""
+           :notes-entry-followup-loading? false
+           :notes-response-followup-loading? false
 
            ;; App configuration (loaded from settings/config.json)
            :config {}

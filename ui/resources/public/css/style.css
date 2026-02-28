@@ -494,6 +494,66 @@ body {
 }
 
 /* ============================================================
+   Follow-up bars — inline transcript inputs
+   ============================================================ */
+
+.followup-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--gray-200);
+  background: white;
+  flex-shrink: 0;
+}
+.followup-input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--gray-300);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  color: var(--gray-800);
+  outline: none;
+}
+.followup-input:focus {
+  border-color: var(--primary);
+}
+.followup-input::placeholder {
+  color: var(--gray-400);
+}
+.followup-input:disabled {
+  background: var(--gray-50);
+  color: var(--gray-400);
+}
+.followup-submit-btn {
+  padding: 0.35rem 0.75rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.followup-submit-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.followup-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Response card follow-up bar — slightly inset to match the card */
+.notes-response-card .followup-bar {
+  border-top: none;
+  border-left: 3px solid var(--gray-200);
+  padding: 0.4rem 0.75rem;
+  background: var(--gray-50);
+}
+
+/* ============================================================
    LLM Registry page
    ============================================================ */
 

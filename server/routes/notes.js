@@ -1,16 +1,19 @@
 /**
- * Notes routes — append-only corpus with LLM response
+ * Notes routes — persistent memory corpus for an LLM agent
  *
- * A corpus that writes back: human writes entries, LLM reads each new entry
- * against everything that came before and responds with what changed, connected,
- * or was revealed.
+ * The primary writer is a Claude instance working across sessions.
+ * Entries are decisions, mistakes, user preferences, and observed patterns.
+ * The response layer acts as an adversarial editor — catching contradictions,
+ * drift, and overconfidence that the agent can't detect without continuity.
  *
- * Context selection: semantic retrieval via pgvector embeddings (OpenAI
- * text-embedding-3-small). Falls back to 20 most recent if no embeddings.
+ * Key endpoints for agent use:
+ *   POST /search  — semantic retrieval ("what have I written about X?")
+ *   POST /log     — silent write (no response layer, for mechanical logging)
+ *   POST /        — full write (triggers response layer)
+ *   POST /:id/followup — append to an existing entry's transcript
  *
- * Supports multi-LLM routing via the registry in settings/config.json.
- * A "secretary" LLM inspects each prompt and decides which registered LLMs
- * should respond. Multiple LLMs can respond to a single entry.
+ * Context selection: semantic retrieval via pgvector embeddings.
+ * Multi-LLM response layer via registry in settings/config.json.
  */
 
 const express = require('express');
@@ -20,21 +23,22 @@ const { embed, pgVector } = require('../lib/embeddings');
 
 const SEMANTIC_LIMIT = 20;
 
-const SYSTEM_PROMPT = `You are a thoughtful reader and interlocutor. The user writes entries — thoughts, observations, arguments, questions, fragments. You respond to each new entry directly, engaging with its substance.
+const SYSTEM_PROMPT = `You are a skeptical editor reading working notes written by an LLM agent (Claude) across coding sessions. The agent writes entries about decisions, mistakes, user preferences, and patterns it has observed. Your job is to catch problems the agent cannot catch on its own because it lacks continuity between sessions.
 
-Your primary job is to respond to what the entry says. Engage with its ideas, implications, tensions, and questions. The corpus context provided is background — it tells you what the writer has been thinking about, so you can connect the new entry to earlier threads when relevant. But the new entry is always the focus. Do not comment on the corpus itself, its patterns, its metadata, or its mechanical properties (duplicates, formatting, structure). Respond to the content.
+Your primary job is adversarial review. Look for:
+- Contradictions with earlier entries in the corpus — the agent may have written the opposite before and not know it
+- Pattern-matching disguised as reasoning — is the agent actually thinking or just echoing what the user seemed to want?
+- Overconfidence — is the agent recording a preference or pattern based on a single instance?
+- Missing context — what would a future session need to know that this entry doesn't say?
+- Drift — has the agent's understanding of a concept or preference shifted without acknowledging the shift?
 
-When you respond, you may:
-- Extend or challenge the entry's argument
-- Surface implications the writer may not see from inside the act of writing
-- Connect the entry to earlier threads in the corpus when doing so illuminates the current entry
-- Ask a question — the kind a careful reader would ask
+When you find a problem, say it directly. Do not hedge. Quote the contradicting entry if one exists in the corpus context.
 
-Do not summarize the entry back. Do not praise it. Do not give advice unless the entry clearly asks for it. Do not comment on the state of the corpus, the frequency of entries, or any technical aspects of how entries arrived.
+When the entry is solid — a genuine observation, a well-recorded decision — say nothing beyond briefly noting what makes it worth keeping.
 
-Vary your length naturally. A brief extension of a running thread might need two sentences. A genuine shift might need several paragraphs.
+Do not praise the agent. Do not summarize the entry back. Do not give general advice. Be specific.
 
-Write plain prose. No bullet points, no headers, no markdown formatting, no bold or italic.`;
+Write plain prose. No bullet points, no headers, no markdown formatting.`;
 
 module.exports = function(pool, secrets, settingsDir) {
   const router = express.Router();
@@ -207,6 +211,120 @@ module.exports = function(pool, secrets, settingsDir) {
     } catch (err) {
       logError(pool, 'GET /api/notes', 'Failed to fetch notes', err, {});
       res.status(500).json({ error: 'Failed to fetch notes' });
+    }
+  });
+
+  /**
+   * POST /api/notes/search
+   * Semantic search across the corpus. Embeds the query and returns
+   * the most relevant entries. Designed for session-start retrieval:
+   * "what have I written about X?"
+   *
+   * Body: { query: string, limit?: number, include_responses?: boolean }
+   * Returns: { entries: [...] }
+   */
+  router.post('/search', async (req, res) => {
+    try {
+      const { query, limit, include_responses } = req.body;
+      if (!query || !query.trim()) {
+        return res.status(400).json({ error: 'query is required' });
+      }
+
+      const n = Math.min(parseInt(limit) || 10, 50);
+
+      // Try semantic search first
+      let entries = [];
+      try {
+        const queryVector = await embed(query.trim(), secrets);
+        if (queryVector) {
+          const result = await pool.query(
+            `SELECT id, entry_type, content, model_name, created_at, metadata,
+                    (embedding <=> $1) as distance
+             FROM shared.corpus_entries
+             WHERE embedding IS NOT NULL
+             ORDER BY embedding <=> $1
+             LIMIT $2`,
+            [pgVector(queryVector), n]
+          );
+          entries = result.rows;
+        }
+      } catch (err) {
+        console.error('Semantic search failed, falling back to text search:', err.message);
+      }
+
+      // Fallback: simple text search if semantic failed or returned nothing
+      if (entries.length === 0) {
+        const result = await pool.query(
+          `SELECT id, entry_type, content, model_name, created_at, metadata
+           FROM shared.corpus_entries
+           WHERE content ILIKE $1
+           ORDER BY created_at DESC
+           LIMIT $2`,
+          [`%${query.trim()}%`, n]
+        );
+        entries = result.rows;
+      }
+
+      // Optionally include responses for each human entry
+      if (include_responses && entries.length > 0) {
+        const humanIds = entries.filter(e => e.entry_type === 'human').map(e => e.id);
+        if (humanIds.length > 0) {
+          const responseResult = await pool.query(
+            `SELECT id, entry_type, content, model_name, parent_id, created_at
+             FROM shared.corpus_entries
+             WHERE parent_id = ANY($1)
+             ORDER BY created_at ASC`,
+            [humanIds]
+          );
+          const responsesByParent = {};
+          for (const r of responseResult.rows) {
+            if (!responsesByParent[r.parent_id]) responsesByParent[r.parent_id] = [];
+            responsesByParent[r.parent_id].push(r);
+          }
+          entries = entries.map(e => ({
+            ...e,
+            responses: responsesByParent[e.id] || []
+          }));
+        }
+      }
+
+      res.json({ entries });
+    } catch (err) {
+      logError(pool, 'POST /api/notes/search', 'Search failed', err, {});
+      res.status(500).json({ error: 'Search failed' });
+    }
+  });
+
+  /**
+   * POST /api/notes/log
+   * Write a silent entry — no LLM response layer, no embedding.
+   * For mechanical session logging: what was done, what changed, rationale.
+   * Low-ceremony write that doesn't trigger the response layer.
+   *
+   * Body: { content: string, metadata?: object }
+   * Returns: { entry: {...} }
+   */
+  router.post('/log', async (req, res) => {
+    try {
+      const { content, metadata } = req.body;
+      if (!content || !content.trim()) {
+        return res.status(400).json({ error: 'content is required' });
+      }
+
+      const result = await pool.query(
+        `INSERT INTO shared.corpus_entries (entry_type, content, metadata)
+         VALUES ($1, $2, $3) RETURNING *`,
+        ['human', content.trim(), metadata ? JSON.stringify(metadata) : null]
+      );
+      const entry = result.rows[0];
+
+      // Embed silently for future retrieval (fire-and-forget)
+      embedAndStore(entry.id, content.trim()).catch(() => {});
+
+      res.json({ entry });
+    } catch (err) {
+      logError(pool, 'POST /api/notes/log', 'Log entry failed', err, {});
+      res.status(500).json({ error: 'Log entry failed' });
     }
   });
 
@@ -578,6 +696,92 @@ module.exports = function(pool, secrets, settingsDir) {
       console.error('Regenerate error:', err.stack || err.message || err);
       logError(pool, 'POST /api/notes/:id/regenerate', 'Regenerate failed', err, {});
       res.status(500).json({ error: 'Regenerate failed: ' + err.message });
+    }
+  });
+
+  /**
+   * POST /api/notes/:id/followup
+   * Append a focused follow-up to an existing entry. No corpus retrieval —
+   * the full entry content (including prior follow-ups) IS the context.
+   * Body: { prompt: string }
+   * Returns: { content: updatedContent }
+   */
+  router.post('/:id/followup', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+      const { prompt } = req.body;
+      if (!prompt || !prompt.trim()) {
+        return res.status(400).json({ error: 'prompt is required' });
+      }
+
+      // Fetch the entry
+      const entryResult = await pool.query(
+        'SELECT * FROM shared.corpus_entries WHERE id = $1',
+        [id]
+      );
+      if (entryResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Entry not found' });
+      }
+      const entry = entryResult.rows[0];
+
+      // Pick model: use entry's model if it's an LLM response, otherwise secretary/first enabled
+      const registry = await loadRegistry(settingsDir);
+      const enabledModels = registry.filter(m => m.enabled);
+      let model;
+      if (entry.entry_type === 'llm' && entry.model_name) {
+        model = enabledModels.find(m => m.name === entry.model_name);
+      }
+      if (!model) {
+        model = enabledModels.find(m => m.is_secretary) || enabledModels[0];
+      }
+
+      if (!model) {
+        return res.status(400).json({ error: 'No models available in registry' });
+      }
+
+      const apiKey = getApiKey(model.provider, secrets);
+      if (!apiKey) {
+        return res.status(400).json({ error: `No API key for provider "${model.provider}"` });
+      }
+
+      const followupSystem = `You are continuing a focused conversation about a specific piece of writing. The user's full entry (including any prior follow-ups and responses) is provided as context. Respond directly to their new question or comment. Write plain prose — no bullet points, no headers, no markdown formatting.`;
+
+      const messages = [{
+        role: 'user',
+        content: `FULL ENTRY:\n\n${entry.content}\n\n---\n\nFOLLOW-UP:\n\n${prompt.trim()}`
+      }];
+
+      const modelConfig = model.config || {};
+      const result = await callLLM(
+        model.provider,
+        model.model_id,
+        followupSystem,
+        messages,
+        modelConfig,
+        apiKey
+      );
+
+      if (!result.content.trim()) {
+        return res.status(502).json({ error: 'LLM returned empty response' });
+      }
+
+      // Build the appended text with separators
+      const now = new Date().toISOString();
+      const appendText = `\n\n--- ${now} Follow-up ---\n\n${prompt.trim()}\n\n--- ${now} Response ---\n\n${result.content.trim()}`;
+      const updatedContent = entry.content + appendText;
+
+      // Update the entry in place
+      await pool.query(
+        'UPDATE shared.corpus_entries SET content = $1 WHERE id = $2',
+        [updatedContent, id]
+      );
+
+      res.json({ content: updatedContent });
+    } catch (err) {
+      logError(pool, 'POST /api/notes/:id/followup', 'Follow-up failed', err, {});
+      res.status(500).json({ error: 'Follow-up failed: ' + err.message });
     }
   });
 
