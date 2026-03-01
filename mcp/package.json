@@ -1,0 +1,10 @@
+{
+  "name": "claude-corpus-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing claude-corpus API as tools for Claude Code",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.1"
+  }
+}
