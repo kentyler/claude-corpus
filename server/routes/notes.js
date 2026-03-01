@@ -65,6 +65,42 @@ module.exports = function(pool, secrets, settingsDir) {
   }
 
   // ================================================================
+  // Helpers
+  // ================================================================
+
+  /** Format corpus entries as [H]/[R] tagged text for LLM context. */
+  function buildCorpusText(corpusEntries) {
+    return corpusEntries.map(e => {
+      const marker = e.entry_type === 'human' ? '[H]' : '[R]';
+      return `${marker} ${e.content}`;
+    }).join('\n\n---\n\n');
+  }
+
+  /** Insert an LLM response entry and fire-and-forget embed it. Returns the inserted row. */
+  async function insertLLMResponse(content, parentId, modelName, temperature) {
+    const result = await pool.query(
+      'INSERT INTO shared.corpus_entries (entry_type, content, parent_id, model_name, temperature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      ['llm', content, parentId, modelName, temperature]
+    );
+    const entry = result.rows[0];
+    embedAndStore(entry.id, content).catch(() => {});
+    return entry;
+  }
+
+  /** Look up a model in the registry and validate its API key. Returns { model, apiKey } or throws. */
+  function findModelAndKey(registry, modelName) {
+    const model = registry.find(m => m.name === modelName);
+    if (!model) {
+      throw Object.assign(new Error(`Model "${modelName}" not found in registry`), { status: 400 });
+    }
+    const apiKey = getApiKey(model.provider, secrets);
+    if (!apiKey) {
+      throw Object.assign(new Error(`No API key for provider "${model.provider}"`), { status: 400 });
+    }
+    return { model, apiKey };
+  }
+
+  // ================================================================
   // Corpus Access Primitives
   // Building blocks the secretary composes. Each returns
   // rows with { id, entry_type, content } and logs the retrieval.
@@ -365,7 +401,7 @@ module.exports = function(pool, secrets, settingsDir) {
             if (retResult.rows.length > 0) {
               entry.sampling_strategy = retResult.rows[0].strategy;
             }
-          } catch (_) { /* column/table may not exist */ }
+          } catch (err) { console.error('Sampling strategy lookup failed (non-fatal):', err.message); }
         }
       }
 
@@ -496,10 +532,7 @@ module.exports = function(pool, secrets, settingsDir) {
       }
 
       // Build corpus text for the responding model(s)
-      const corpusText = corpusEntries.map(e => {
-        const marker = e.entry_type === 'human' ? '[H]' : '[R]';
-        return `${marker} ${e.content}`;
-      }).join('\n\n---\n\n');
+      const corpusText = buildCorpusText(corpusEntries);
 
       const userMessage = [{
         role: 'user',
@@ -530,15 +563,10 @@ module.exports = function(pool, secrets, settingsDir) {
         for (const result of llmResults) {
           if (result.status === 'fulfilled' && result.value.content.trim()) {
             try {
-              const llmResult = await pool.query(
-                'INSERT INTO shared.corpus_entries (entry_type, content, parent_id, model_name, temperature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-                ['llm', result.value.content.trim(), humanEntry.id, result.value.modelName, result.value.temperature]
+              const llmEntry = await insertLLMResponse(
+                result.value.content.trim(), humanEntry.id, result.value.modelName, result.value.temperature
               );
-              const llmEntry = llmResult.rows[0];
               responses.push(llmEntry);
-
-              // Embed the LLM response (fire-and-forget)
-              embedAndStore(llmEntry.id, result.value.content.trim()).catch(() => {});
             } catch (insertErr) {
               logError(pool, 'POST /api/notes', 'Failed to insert LLM response', insertErr, {});
             }
@@ -553,7 +581,7 @@ module.exports = function(pool, secrets, settingsDir) {
           try {
             const result = await callLLM(
               'anthropic',
-              'claude-sonnet-4-20250514',
+              'claude-sonnet-4-6-20250514',
               SYSTEM_PROMPT,
               userMessage,
               { max_tokens: 2048 },
@@ -561,15 +589,10 @@ module.exports = function(pool, secrets, settingsDir) {
             );
 
             if (result.content.trim()) {
-              const llmResult = await pool.query(
-                'INSERT INTO shared.corpus_entries (entry_type, content, parent_id, model_name, temperature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-                ['llm', result.content.trim(), humanEntry.id, 'Claude Sonnet', 1.0]
+              const llmEntry = await insertLLMResponse(
+                result.content.trim(), humanEntry.id, 'Claude Sonnet', 1.0
               );
-              const llmEntry = llmResult.rows[0];
               responses.push(llmEntry);
-
-              // Embed the LLM response (fire-and-forget)
-              embedAndStore(llmEntry.id, result.content.trim()).catch(() => {});
             }
           } catch (llmErr) {
             logError(pool, 'POST /api/notes', 'LLM response failed', llmErr, {});
@@ -596,7 +619,6 @@ module.exports = function(pool, secrets, settingsDir) {
       if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
 
       const { model_name, temperature, sampling } = req.body;
-      console.log('Regenerate request:', { id, model_name, temperature, sampling });
       if (!model_name) return res.status(400).json({ error: 'model_name is required' });
 
       // Look up the human entry
@@ -611,14 +633,11 @@ module.exports = function(pool, secrets, settingsDir) {
 
       // Find model in registry
       const registry = await loadRegistry(settingsDir);
-      const model = registry.find(m => m.name === model_name);
-      if (!model) {
-        return res.status(400).json({ error: `Model "${model_name}" not found in registry` });
-      }
-
-      const apiKey = getApiKey(model.provider, secrets);
-      if (!apiKey) {
-        return res.status(400).json({ error: `No API key for provider "${model.provider}"` });
+      let model, apiKey;
+      try {
+        ({ model, apiKey } = findModelAndKey(registry, model_name));
+      } catch (lookupErr) {
+        return res.status(lookupErr.status || 400).json({ error: lookupErr.message });
       }
 
       // Embed the entry text for corpus retrieval (returns JS array, safe for pgVector())
@@ -629,10 +648,7 @@ module.exports = function(pool, secrets, settingsDir) {
       const corpusEntries = await executeSampling(id, queryVector, chosenSampling, {});
 
       // Build corpus text
-      const corpusText = corpusEntries.map(e => {
-        const marker = e.entry_type === 'human' ? '[H]' : '[R]';
-        return `${marker} ${e.content}`;
-      }).join('\n\n---\n\n');
+      const corpusText = buildCorpusText(corpusEntries);
 
       const userMessage = [{
         role: 'user',
@@ -662,23 +678,8 @@ module.exports = function(pool, secrets, settingsDir) {
         return res.status(502).json({ error: 'LLM returned empty response' });
       }
 
-      // Insert the new response (graceful fallback if temperature column missing)
-      let llmEntry;
-      try {
-        const llmResult = await pool.query(
-          'INSERT INTO shared.corpus_entries (entry_type, content, parent_id, model_name, temperature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-          ['llm', result.content.trim(), id, model.name, chosenTemp]
-        );
-        llmEntry = llmResult.rows[0];
-      } catch (colErr) {
-        // temperature column may not exist yet — insert without it
-        const llmResult = await pool.query(
-          'INSERT INTO shared.corpus_entries (entry_type, content, parent_id, model_name) VALUES ($1, $2, $3, $4) RETURNING *',
-          ['llm', result.content.trim(), id, model.name]
-        );
-        llmEntry = llmResult.rows[0];
-        llmEntry.temperature = chosenTemp; // include in response even if not persisted
-      }
+      // Insert the new response
+      const llmEntry = await insertLLMResponse(result.content.trim(), id, model.name, chosenTemp);
 
       // Update the human entry's sampling metadata
       try {
@@ -686,7 +687,7 @@ module.exports = function(pool, secrets, settingsDir) {
           'UPDATE shared.corpus_entries SET sampling_strategy = $1 WHERE id = $2',
           [chosenSampling, id]
         );
-      } catch (_) { /* non-fatal — column may not exist */ }
+      } catch (err) { console.error('Sampling metadata update failed (non-fatal):', err.message); }
 
       // Embed the response (fire-and-forget)
       embedAndStore(llmEntry.id, result.content.trim()).catch(() => {});

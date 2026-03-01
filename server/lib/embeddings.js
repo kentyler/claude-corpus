@@ -129,4 +129,4 @@ function pgVector(embedding) {
   return '[' + embedding.join(',') + ']';
 }
 
-module.exports = { embed, pgVector, EMBED_DIMENSIONS };
+module.exports = { embed, pgVector };

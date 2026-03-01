@@ -5,13 +5,7 @@
  *   DATABASE_URL or individual PG* variables
  */
 
-// Detect if running in WSL - if so, use Windows host IP
-const isWSL = process.platform === 'linux' &&
-  require('fs').existsSync('/proc/version') &&
-  require('fs').readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
-
-// Default host: Windows host IP from WSL, or localhost on Windows
-const defaultHost = isWSL ? '10.255.255.254' : '127.0.0.1';
+const defaultHost = '127.0.0.1';
 
 module.exports = function(secrets) {
   const pgPassword = process.env.PGPASSWORD || secrets?.database?.password || '';
