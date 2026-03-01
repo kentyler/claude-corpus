@@ -1,7 +1,7 @@
 # Corpus Server Startup Script
 
 param(
-    [int]$Port = 3002
+    [int]$Port = 3003
 )
 
 Write-Host "Corpus Server" -ForegroundColor Cyan
